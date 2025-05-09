@@ -11,6 +11,8 @@ import tkinter as tk
 import json
 import threading
 import sys
+import torch
+import math  # Add this import for mathematical operations
 
 # Initialize pygame
 pygame.init()
@@ -86,7 +88,7 @@ class LoadingScreen:
         pygame.draw.rect(self.screen, WHITE, (bar_x, bar_y, bar_width, bar_height), 2)
         
         # Draw progress bar fill
-        fill_width = int(bar_width * self.progress)
+        fill_width = int(bar_width * self.progress)  # Corrected proportional calculation
         pygame.draw.rect(self.screen, TEAL, (bar_x, bar_y, fill_width, bar_height))
         
         # Draw loading text
@@ -112,19 +114,16 @@ class LoadingScreen:
         
         pygame.display.flip()
     
-    def update(self, progress):
-        self.progress = progress
-        # Calculate the current task based on progress
-        self.current_task = int(progress * len(self.tasks))
-        if self.current_task >= len(self.tasks):
-            self.current_task = len(self.tasks) - 1
-        
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                pygame.quit()
-                sys.exit()
-        self.draw()
-        self.clock.tick(FPS)
+    def update(self, target_progress):
+        while self.progress < target_progress:
+            self.progress += 0.01  # Increment progress gradually
+            self.current_task = min(int(self.progress * len(self.tasks)), len(self.tasks) - 1)
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    pygame.quit()
+                    sys.exit()
+            self.draw()
+            self.clock.tick(FPS)
 
 # Add initialize_mediapipe and load_alert_sound functions from drowsinessui.py
 def initialize_mediapipe():
@@ -154,6 +153,13 @@ def load_alert_sound():
         tone_bytes = tone.tobytes()
         alert_sound = pygame.mixer.Sound(buffer=tone_bytes)
     return alert_sound
+
+def load_custom_sound(file_name):
+    try:
+        return pygame.mixer.Sound(file_name)
+    except:
+        print(f"Sound file '{file_name}' not found.")
+        return None
 
 class Button:
     def __init__(self, x, y, width, height, text, color, hover_color, text_color=WHITE, font_size=20):
@@ -210,6 +216,9 @@ class ModernDrowsinessDetection:
                 "EAR_THRESHOLD": EAR_THRESHOLD,
                 "DROWSY_FRAMES_THRESHOLD": DROWSY_FRAMES_THRESHOLD,
                 "BLINK_THRESHOLD": BLINK_THRESHOLD,
+                "YAWN_THRESHOLD": 30,  # Add yawn threshold to settings
+                "YAWN_COOLDOWN": 5,    # Add yawn cooldown to settings
+                "EYE_CLOSURE_DURATION": 3.0  # Add eye closure duration to settings (in seconds)
             }
         
         self.loading_screen.update(0.2)
@@ -280,6 +289,10 @@ class ModernDrowsinessDetection:
         self.start_time = time.time()
         self.ear_values = deque(maxlen=100)  # For plotting EAR graph
         
+        # Yawn detection variables
+        self.yawn_count = 0
+        self.last_yawn_time = 0
+        
         # Session stats
         self.session_start_time = time.time()
         self.drowsy_alerts = 0
@@ -290,12 +303,49 @@ class ModernDrowsinessDetection:
         self.running = True
         self.clock = pygame.time.Clock()
         self.face_detected = False
-        self.faces_data = {}  # Dictionary to store data for multiple faces
         
         # Show a welcome animation
         self.loading_screen.update(0.9)
         self.show_welcome_animation()
         self.loading_screen.update(1.0)
+
+        self.zor_sound = load_custom_sound("zor.wav")
+        self.mp_hands = mp.solutions.hands
+        self.hands = self.mp_hands.Hands(
+            max_num_hands=2,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5
+        )
+        
+        model_path = 'models/clf_lstm_jit6.pth'
+        models_dir = os.path.dirname(model_path)
+        
+        # Ensure the models directory exists
+        if not os.path.exists(models_dir):
+            print(f"Creating missing directory: {models_dir}")
+            os.makedirs(models_dir)
+        
+        print(f"Current working directory: {os.getcwd()}")
+        print(f"Contents of 'models' directory: {os.listdir(models_dir) if os.path.exists(models_dir) else 'Directory does not exist'}")
+        
+        # Check if the model file exists
+        if not os.path.exists(model_path):
+            print(f"Error: Model file not found at {model_path}.")
+            print("Please ensure the model file exists in the 'models' directory.")
+            print("If you don't have the model file, you can download or generate it.")
+            print("Exiting the program...")
+            sys.exit(1)  # Exit the program if the model file is missing
+        
+        # Load the model
+        self.model = torch.jit.load(model_path)
+        self.model.eval()
+        self.ears_norm, self.mars_norm, self.pucs_norm, self.moes_norm = calibrate(self.run_face_mp)
+        self.input_data = []
+        self.frame_before_run = 0
+        self.label = None
+        
+        # Initialize drowsiness detection variables
+        self.eye_closure_start_time = None
         
     def show_welcome_animation(self):
         """Show a welcome animation before starting the main application"""
@@ -368,17 +418,30 @@ class ModernDrowsinessDetection:
         
         return len(self.blink_times)
     
+    def calculate_angle(self, point1, point2, point3):
+        """Calculate the angle formed by three points."""
+        a = np.array(point1)
+        b = np.array(point2)
+        c = np.array(point3)
+        
+        ba = a - b
+        bc = c - b
+        
+        cosine_angle = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc))
+        angle = np.arccos(np.clip(cosine_angle, -1.0, 1.0))
+        return np.degrees(angle)
+
     def process_frame(self, frame):
         # Convert to RGB for MediaPipe
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = self.face_mesh.process(rgb_frame)
         
+        ear = 0
         self.face_detected = False
-        self.faces_data.clear()  # Clear previous frame's data
         
         if results.multi_face_landmarks:
             self.face_detected = True
-            for face_id, face_landmarks in enumerate(results.multi_face_landmarks):
+            for face_landmarks in results.multi_face_landmarks:
                 h, w, c = frame.shape
                 
                 left_eye_coords = []
@@ -400,19 +463,20 @@ class ModernDrowsinessDetection:
                 right_ear = self.calculate_ear(right_eye_coords)
                 
                 ear = (left_ear + right_ear) / 2.0
-                self.faces_data[face_id] = {
-                    "ear": ear,
-                    "drowsy_frames": self.faces_data.get(face_id, {}).get("drowsy_frames", 0),
-                    "alert_active": self.faces_data.get(face_id, {}).get("alert_active", False),
-                    "last_alert_time": self.faces_data.get(face_id, {}).get("last_alert_time", 0),
-                }
+                self.current_ear = ear
+                self.ear_values.append(ear)
                 
-                # Drowsiness detection logic
                 if ear < EAR_THRESHOLD:
-                    self.faces_data[face_id]["drowsy_frames"] += 1
+                    self.drowsy_frames += 1
                     
-                    if self.faces_data[face_id]["drowsy_frames"] >= DROWSY_FRAMES_THRESHOLD:
-                        cv2.putText(frame, f"UYKUSUZLUK UYARISI! (Kişi {face_id + 1})", (10, 30 + face_id * 30)) 
+                    if self.drowsy_frames >= DROWSY_FRAMES_THRESHOLD:
+                        cv2.putText(frame, "UYKUSUZLUK UYARISI!", (10, 30), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                        
+                        current_time = time.time()
+                        if not self.alert_active or (current_time - self.last_alert_time) > ALERT_COOLDOWN:
+                            self.alert_sound.play()
+                            self.alert_active = True
                             self.last_alert_time = current_time
                             self.drowsy_alerts += 1
                 else:
@@ -429,6 +493,72 @@ class ModernDrowsinessDetection:
                         self.blink_times.append(time.time())
                     self.blink_start = False
                     self.blink_frames = 0
+        
+        # Detect yawning
+        if results.multi_face_landmarks:
+            for face_landmarks in results.multi_face_landmarks:
+                # Get mouth landmarks
+                upper_lip = face_landmarks.landmark[13]  # Upper lip center
+                lower_lip = face_landmarks.landmark[14]  # Lower lip center
+                
+                # Convert landmarks to pixel coordinates
+                upper_lip_coords = (int(upper_lip.x * w), int(upper_lip.y * h))
+                lower_lip_coords = (int(lower_lip.x * w), int(lower_lip.y * h))
+                
+                # Calculate distance between upper and lower lips
+                lip_distance = np.linalg.norm(np.array(upper_lip_coords) - np.array(lower_lip_coords))
+                
+                # Check if the distance exceeds the threshold for yawning
+                current_time = time.time()
+                if lip_distance > self.settings["YAWN_THRESHOLD"]:
+                    if current_time - self.last_yawn_time > self.settings["YAWN_COOLDOWN"]:
+                        self.yawn_count += 1
+                        self.last_yawn_time = current_time
+                        print(f"Yawn detected! Total yawns: {self.yawn_count}")
+                        cv2.putText(frame, "ESNEME ALGILANDI!", (10, 60), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        
+        # Detect hands and fingers
+        hand_results = self.hands.process(rgb_frame)
+        
+        if hand_results.multi_hand_landmarks:
+            for hand_landmarks in hand_results.multi_hand_landmarks:
+                h, w, c = frame.shape
+                
+                # Draw hand landmarks
+                for idx, landmark in enumerate(hand_landmarks.landmark):
+                    x, y = int(landmark.x * w), int(landmark.y * h)
+                    cv2.circle(frame, (x, y), 5, (255, 0, 0), -1)
+                
+                # Draw connections between landmarks
+                self.mp_drawing.draw_landmarks(
+                    frame, hand_landmarks, self.mp_hands.HAND_CONNECTIONS,
+                    self.drawing_spec, self.drawing_spec
+                )
+                
+                # Get specific landmarks for thumb, index, and middle fingers
+                thumb_tip = hand_landmarks.landmark[self.mp_hands.HandLandmark.THUMB_TIP]
+                index_tip = hand_landmarks.landmark[self.mp_hands.HandLandmark.INDEX_FINGER_TIP]
+                middle_tip = hand_landmarks.landmark[self.mp_hands.HandLandmark.MIDDLE_FINGER_TIP]
+                
+                # Convert landmarks to pixel coordinates
+                thumb_coords = (int(thumb_tip.x * w), int(thumb_tip.y * h))
+                index_coords = (int(index_tip.x * w), int(index_tip.y * h))
+                middle_coords = (int(middle_tip.x * w), int(middle_tip.y * h))
+                
+                # Check if thumb tip is between index and middle finger tips
+                if min(index_coords[1], middle_coords[1]) < thumb_coords[1] < max(index_coords[1], middle_coords[1]):
+                    if min(index_coords[0], middle_coords[0]) < thumb_coords[0] < max(index_coords[0], middle_coords[0]):
+                        if self.zor_sound:
+                            self.zor_sound.play()
+        
+        # Draw face landmarks and connections
+        if results.multi_face_landmarks:
+            for face_landmarks in results.multi_face_landmarks:
+                self.mp_drawing.draw_landmarks(
+                    frame, face_landmarks, self.mp_face_mesh.FACEMESH_TESSELATION,
+                    self.drawing_spec, self.drawing_spec
+                )
         
         # Convert BGR to RGB for Pygame
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -650,6 +780,117 @@ class ModernDrowsinessDetection:
         # Clean up
         self.cap.release()
         pygame.quit()
+
+    def run_face_mp(self, image):
+        ''' Get face landmarks and calculate features '''
+        image = cv2.cvtColor(cv2.flip(image, 1), cv2.COLOR_BGR2RGB)
+        image.flags.writeable = False
+        results = self.face_mesh.process(image)
+        image.flags.writeable = True
+        image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        if results.multi_face_landmarks:
+            landmarks_positions = np.array([[lm.x, lm.y, lm.z] for lm in results.multi_face_landmarks[0].landmark])
+            landmarks_positions[:, 0] *= image.shape[1]
+            landmarks_positions[:, 1] *= image.shape[0]
+            ear = eye_feature(landmarks_positions)
+            mar = mouth_feature(landmarks_positions)
+            puc = pupil_feature(landmarks_positions)
+            moe = mar / ear
+        else:
+            ear, mar, puc, moe = -1000, -1000, -1000, -1000
+        return ear, mar, puc, moe, image
+
+    def infer(self):
+        ''' Perform inference using the calibrated features '''
+        cap = cv2.VideoCapture(0)
+        while cap.isOpened():
+            success, image = cap.read()
+            if not success:
+                print("Ignoring empty camera frame.")
+                continue
+            ear, mar, puc, moe, image = self.run_face_mp(image)
+            if ear != -1000:
+                ear = (ear - self.ears_norm[0]) / self.ears_norm[1]
+                mar = (mar - self.mars_norm[0]) / self.mars_norm[1]
+                puc = (puc - self.pucs_norm[0]) / self.pucs_norm[1]
+                moe = (moe - self.moes_norm[0]) / self.moes_norm[1]
+                self.input_data.append([ear, mar, puc, moe])
+                if len(self.input_data) > 20:
+                    self.input_data.pop(0)
+                self.frame_before_run += 1
+                if self.frame_before_run >= 15 and len(self.input_data) == 20:
+                    self.frame_before_run = 0
+                    self.label = get_classification(self.input_data)
+            # ...existing code for displaying results...
+        cap.release()
+
+def distance(p1, p2):
+    ''' Calculate distance between two points '''
+    return (((p1[:2] - p2[:2])**2).sum())**0.5
+
+def eye_aspect_ratio(landmarks, eye):
+    ''' Calculate the ratio of the eye length to eye width '''
+    N1 = distance(landmarks[eye[1][0]], landmarks[eye[1][1]])
+    N2 = distance(landmarks[eye[2][0]], landmarks[eye[2][1]])
+    N3 = distance(landmarks[eye[3][0]], landmarks[eye[3][1]])
+    D = distance(landmarks[eye[0][0]], landmarks[eye[0][1]])
+    return (N1 + N2 + N3) / (3 * D)
+
+def eye_feature(landmarks):
+    ''' Calculate the eye feature as the average of the eye aspect ratio for the two eyes '''
+    return (eye_aspect_ratio(landmarks, left_eye) + eye_aspect_ratio(landmarks, right_eye)) / 2
+
+def mouth_feature(landmarks):
+    ''' Calculate mouth feature as the ratio of the mouth length to mouth width '''
+    N1 = distance(landmarks[mouth[1][0]], landmarks[mouth[1][1]])
+    N2 = distance(landmarks[mouth[2][0]], landmarks[mouth[2][1]])
+    N3 = distance(landmarks[mouth[3][0]], landmarks[mouth[3][1]])
+    D = distance(landmarks[mouth[0][0]], landmarks[mouth[0][1]])
+    return (N1 + N2 + N3) / (3 * D)
+
+def pupil_circularity(landmarks, eye):
+    ''' Calculate pupil circularity feature '''
+    perimeter = sum(distance(landmarks[eye[i][0]], landmarks[eye[(i + 1) % len(eye)][0]]) for i in range(len(eye)))
+    area = math.pi * ((distance(landmarks[eye[1][0]], landmarks[eye[3][1]]) * 0.5) ** 2)
+    return (4 * math.pi * area) / (perimeter ** 2)
+
+def pupil_feature(landmarks):
+    ''' Calculate the pupil feature as the average of the pupil circularity for the two eyes '''
+    return (pupil_circularity(landmarks, left_eye) + pupil_circularity(landmarks, right_eye)) / 2
+
+def calibrate(run_face_mp, calib_frame_count=25):
+    ''' Perform calibration to get neutral state features '''
+    ears, mars, pucs, moes = [], [], [], []
+    cap = cv2.VideoCapture(0)
+    while cap.isOpened():
+        success, image = cap.read()
+        if not success:
+            print("Ignoring empty camera frame.")
+            continue
+        ear, mar, puc, moe, _ = run_face_mp(image)
+        if ear != -1000:
+            ears.append(ear)
+            mars.append(mar)
+            pucs.append(puc)
+            moes.append(moe)
+        if len(ears) >= calib_frame_count:
+            break
+    cap.release()
+    return [np.mean(ears), np.std(ears)], [np.mean(mars), np.std(mars)], [np.mean(pucs), np.std(pucs)], [np.mean(moes), np.std(moes)]
+
+def get_classification(input_data):
+    ''' Perform classification over the facial features '''
+    model_input = [input_data[i:i + 5] for i in range(0, len(input_data) - 4, 3)]
+    model_input = torch.FloatTensor(np.array(model_input))
+    preds = torch.sigmoid(model(model_input)).gt(0.5).int().data.numpy()
+    return int(preds.sum() >= 5)
+
+# Define eye landmark indices
+left_eye = [[263, 362], [387, 373], [386, 374], [385, 380]]  # Left eye landmark positions
+right_eye = [[33, 133], [160, 144], [159, 145], [158, 153]]  # Right eye landmark positions
+
+# Define mouth landmark indices (if needed elsewhere in the code)
+mouth = [[61, 291], [39, 181], [0, 17], [269, 405]]
 
 if __name__ == "__main__":
     app = ModernDrowsinessDetection()

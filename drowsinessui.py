@@ -38,13 +38,7 @@ PANEL_WIDTH = 300
 HEADER_HEIGHT = 60
 FOOTER_HEIGHT = 40
 
-# Eye detection constants
-EAR_THRESHOLD = 0.15
-DROWSY_FRAMES_THRESHOLD = 30
-BLINK_THRESHOLD = 0.2
-ALERT_COOLDOWN = 3.0
 
-# Add LoadingScreen class from drowsinessui.py
 class LoadingScreen:
     def __init__(self):
         self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
@@ -114,11 +108,7 @@ class LoadingScreen:
     
     def update(self, progress):
         self.progress = progress
-        # Calculate the current task based on progress
-        self.current_task = int(progress * len(self.tasks))
-        if self.current_task >= len(self.tasks):
-            self.current_task = len(self.tasks) - 1
-        
+        self.current_task = min(int(progress * len(self.tasks)), len(self.tasks) - 1)
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 pygame.quit()
@@ -126,7 +116,7 @@ class LoadingScreen:
         self.draw()
         self.clock.tick(FPS)
 
-# Add initialize_mediapipe and load_alert_sound functions from drowsinessui.py
+# Initialize MediaPipe in a separate function to show progress
 def initialize_mediapipe():
     mp_face_mesh = mp.solutions.face_mesh
     face_mesh = mp_face_mesh.FaceMesh(
@@ -139,6 +129,7 @@ def initialize_mediapipe():
     drawing_spec = mp_drawing.DrawingSpec(thickness=1, circle_radius=1)
     return mp_face_mesh, face_mesh, mp_drawing, drawing_spec
 
+# Load alert sound
 def load_alert_sound():
     try:
         alert_sound = pygame.mixer.Sound("alert.wav")
@@ -182,10 +173,9 @@ class Button:
             return self.rect.collidepoint(pos)
         return False
 
-# Modify ModernDrowsinessDetection class to include loading screen
 class ModernDrowsinessDetection:
     def __init__(self):
-        # Add loading screen initialization
+        # First, show loading screen
         self.loading_screen = LoadingScreen()
         self.loading_screen.update(0.0)
         
@@ -200,6 +190,9 @@ class ModernDrowsinessDetection:
         EAR_THRESHOLD = 0.15
         DROWSY_FRAMES_THRESHOLD = 30
         BLINK_THRESHOLD = 0.2
+
+
+
 
         # Load settings from JSON file
         try:
@@ -290,7 +283,6 @@ class ModernDrowsinessDetection:
         self.running = True
         self.clock = pygame.time.Clock()
         self.face_detected = False
-        self.faces_data = {}  # Dictionary to store data for multiple faces
         
         # Show a welcome animation
         self.loading_screen.update(0.9)
@@ -373,12 +365,12 @@ class ModernDrowsinessDetection:
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = self.face_mesh.process(rgb_frame)
         
+        ear = 0
         self.face_detected = False
-        self.faces_data.clear()  # Clear previous frame's data
         
         if results.multi_face_landmarks:
             self.face_detected = True
-            for face_id, face_landmarks in enumerate(results.multi_face_landmarks):
+            for face_landmarks in results.multi_face_landmarks:
                 h, w, c = frame.shape
                 
                 left_eye_coords = []
@@ -400,19 +392,20 @@ class ModernDrowsinessDetection:
                 right_ear = self.calculate_ear(right_eye_coords)
                 
                 ear = (left_ear + right_ear) / 2.0
-                self.faces_data[face_id] = {
-                    "ear": ear,
-                    "drowsy_frames": self.faces_data.get(face_id, {}).get("drowsy_frames", 0),
-                    "alert_active": self.faces_data.get(face_id, {}).get("alert_active", False),
-                    "last_alert_time": self.faces_data.get(face_id, {}).get("last_alert_time", 0),
-                }
+                self.current_ear = ear
+                self.ear_values.append(ear)
                 
-                # Drowsiness detection logic
                 if ear < EAR_THRESHOLD:
-                    self.faces_data[face_id]["drowsy_frames"] += 1
+                    self.drowsy_frames += 1
                     
-                    if self.faces_data[face_id]["drowsy_frames"] >= DROWSY_FRAMES_THRESHOLD:
-                        cv2.putText(frame, f"UYKUSUZLUK UYARISI! (Kişi {face_id + 1})", (10, 30 + face_id * 30)) 
+                    if self.drowsy_frames >= DROWSY_FRAMES_THRESHOLD:
+                        cv2.putText(frame, "DROWSINESS ALERT!", (10, 30), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                        
+                        current_time = time.time()
+                        if not self.alert_active or (current_time - self.last_alert_time):
+                            self.alert_sound.play()
+                            self.alert_active = True
                             self.last_alert_time = current_time
                             self.drowsy_alerts += 1
                 else:
@@ -496,7 +489,7 @@ class ModernDrowsinessDetection:
         self.screen.blit(total_blink_label, (SCREEN_WIDTH - PANEL_WIDTH + 20, y_pos))
         
         y_pos += 25
-        max_blink_label = self.normal_font.render(f"Toplam Göz Kırpma: {self.max_blink_rate}/min", True, LIGHT_GRAY)
+        max_blink_label = self.normal_font.render(f"Dakika Başına Toplam Göz Kırpma: {self.max_blink_rate}/min", True, LIGHT_GRAY)
         self.screen.blit(max_blink_label, (SCREEN_WIDTH - PANEL_WIDTH + 20, y_pos))
         
         y_pos += 25

@@ -9,8 +9,6 @@ from collections import deque
 from settings_page import SettingsPage
 import tkinter as tk
 import json
-import threading
-import sys
 
 # Initialize pygame
 pygame.init()
@@ -44,116 +42,35 @@ DROWSY_FRAMES_THRESHOLD = 30
 BLINK_THRESHOLD = 0.2
 ALERT_COOLDOWN = 3.0
 
-# Add LoadingScreen class from drowsinessui.py
-class LoadingScreen:
-    def __init__(self):
-        self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-        pygame.display.set_caption("Uykusuzluk Takip Sistemi - Yükleniyor")
-        
-        # Fonts
-        self.title_font = pygame.font.SysFont("Arial", 48, bold=True)
-        self.normal_font = pygame.font.SysFont("Arial", 24)
-        
-        # Loading animation variables
-        self.progress = 0
-        self.loading_text = "Sistem yükleniyor..."
-        self.tasks = [
-            "MediaPipe yüz tanıma modülü başlatılıyor...",
-            "Kamera ayarları yapılandırılıyor...",
-            "Kullanıcı arayüzü hazırlanıyor...",
-            "Uykusuzluk algılama algoritması başlatılıyor...",
-            "Uyarı sistemi hazırlanıyor..."
-        ]
-        self.current_task = 0
-        self.clock = pygame.time.Clock()
-        self.loading_done = False
-        
-    def draw(self):
-        # Fill background
-        self.screen.fill(DARK_GRAY)
-        
-        # Draw title
-        title = self.title_font.render("Uykusuzluk Takip Sistemi", True, WHITE)
-        title_rect = title.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 3))
-        self.screen.blit(title, title_rect)
-        
-        # Draw progress bar background
-        bar_width = SCREEN_WIDTH // 2
-        bar_height = 20
-        bar_x = (SCREEN_WIDTH - bar_width) // 2
-        bar_y = SCREEN_HEIGHT // 2
-        pygame.draw.rect(self.screen, BLACK, (bar_x, bar_y, bar_width, bar_height))
-        pygame.draw.rect(self.screen, WHITE, (bar_x, bar_y, bar_width, bar_height), 2)
-        
-        # Draw progress bar fill
-        fill_width = int(bar_width * self.progress)
-        pygame.draw.rect(self.screen, TEAL, (bar_x, bar_y, fill_width, bar_height))
-        
-        # Draw loading text
-        if self.current_task < len(self.tasks):
-            task_text = self.tasks[self.current_task]
-        else:
-            task_text = "Sistem başlatılıyor..."
-            
-        loading_label = self.normal_font.render(task_text, True, LIGHT_GRAY)
-        loading_rect = loading_label.get_rect(center=(SCREEN_WIDTH // 2, bar_y + 50))
-        self.screen.blit(loading_label, loading_rect)
-        
-        # Draw progress percentage
-        percent_text = self.normal_font.render(f"{int(self.progress * 100)}%", True, WHITE)
-        percent_rect = percent_text.get_rect(center=(SCREEN_WIDTH // 2, bar_y - 30))
-        self.screen.blit(percent_text, percent_rect)
-        
-        # Draw animated dots
-        dots = "." * ((pygame.time.get_ticks() // 500) % 4)
-        dots_text = self.normal_font.render(dots, True, WHITE)
-        dots_rect = dots_text.get_rect(midleft=(loading_rect.right + 5, loading_rect.centery))
-        self.screen.blit(dots_text, dots_rect)
-        
-        pygame.display.flip()
-    
-    def update(self, progress):
-        self.progress = progress
-        # Calculate the current task based on progress
-        self.current_task = int(progress * len(self.tasks))
-        if self.current_task >= len(self.tasks):
-            self.current_task = len(self.tasks) - 1
-        
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                pygame.quit()
-                sys.exit()
-        self.draw()
-        self.clock.tick(FPS)
+# Initialize MediaPipe
+mp_face_mesh = mp.solutions.face_mesh
+face_mesh = mp_face_mesh.FaceMesh(
+    max_num_faces=1,
+    refine_landmarks=True,
+    min_detection_confidence=0.5,
+    min_tracking_confidence=0.5
+)
+mp_drawing = mp.solutions.drawing_utils
+drawing_spec = mp_drawing.DrawingSpec(thickness=1, circle_radius=1)
 
-# Add initialize_mediapipe and load_alert_sound functions from drowsinessui.py
-def initialize_mediapipe():
-    mp_face_mesh = mp.solutions.face_mesh
-    face_mesh = mp_face_mesh.FaceMesh(
-        max_num_faces=1,
-        refine_landmarks=True,
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5
-    )
-    mp_drawing = mp.solutions.drawing_utils
-    drawing_spec = mp_drawing.DrawingSpec(thickness=1, circle_radius=1)
-    return mp_face_mesh, face_mesh, mp_drawing, drawing_spec
+# Eye landmark indices
+LEFT_EYE = [362, 385, 387, 263, 373, 380]
+RIGHT_EYE = [33, 160, 158, 133, 153, 144]
 
-def load_alert_sound():
-    try:
-        alert_sound = pygame.mixer.Sound("alert.wav")
-    except:
-        print("Alert sound file not found. Creating a default beep sound.")
-        # Create a simple beep sound if the file is not found
-        pygame.mixer.init(frequency=44100, size=-16, channels=1)
-        sample_rate = 44100
-        duration = 0.5  # seconds
-        t = np.linspace(0, duration, int(sample_rate * duration), False)
-        tone = np.sin(2 * np.pi * 440 * t)
-        tone = (tone * 32767).astype(np.int16)
-        tone_bytes = tone.tobytes()
-        alert_sound = pygame.mixer.Sound(buffer=tone_bytes)
-    return alert_sound
+# Load alert sound
+try:
+    alert_sound = pygame.mixer.Sound("alert.wav")
+except:
+    print("Alert sound file not found. Creating a default beep sound.")
+    # Create a simple beep sound if the file is not found
+    pygame.mixer.init(frequency=44100, size=-16, channels=1)
+    sample_rate = 44100
+    duration = 0.5  # seconds
+    t = np.linspace(0, duration, int(sample_rate * duration), False)
+    tone = np.sin(2 * np.pi * 440 * t)
+    tone = (tone * 32767).astype(np.int16)
+    tone_bytes = tone.tobytes()
+    alert_sound = pygame.mixer.Sound(buffer=tone_bytes)
 
 class Button:
     def __init__(self, x, y, width, height, text, color, hover_color, text_color=WHITE, font_size=20):
@@ -182,24 +99,10 @@ class Button:
             return self.rect.collidepoint(pos)
         return False
 
-# Modify ModernDrowsinessDetection class to include loading screen
 class ModernDrowsinessDetection:
     def __init__(self):
-        # Add loading screen initialization
-        self.loading_screen = LoadingScreen()
-        self.loading_screen.update(0.0)
-        
-        # Eye landmark indices
-        self.LEFT_EYE = [362, 385, 387, 263, 373, 380]
-        self.RIGHT_EYE = [33, 160, 158, 133, 153, 144]
-        
-        # Initialize components with progress updates
-        self.loading_screen.update(0.1)
+        # Declare global variables
         global EAR_THRESHOLD, DROWSY_FRAMES_THRESHOLD, BLINK_THRESHOLD
-        # Eye detection constants
-        EAR_THRESHOLD = 0.15
-        DROWSY_FRAMES_THRESHOLD = 30
-        BLINK_THRESHOLD = 0.2
 
         # Load settings from JSON file
         try:
@@ -211,33 +114,24 @@ class ModernDrowsinessDetection:
                 "DROWSY_FRAMES_THRESHOLD": DROWSY_FRAMES_THRESHOLD,
                 "BLINK_THRESHOLD": BLINK_THRESHOLD,
             }
-        
-        self.loading_screen.update(0.2)
-        
-        # Initialize MediaPipe (potentially slow operation)
-        self.mp_face_mesh, self.face_mesh, self.mp_drawing, self.drawing_spec = initialize_mediapipe()
-        self.loading_screen.update(0.4)
-        
-        # Load alert sound
-        self.alert_sound = load_alert_sound()
-        self.loading_screen.update(0.5)
+
+        EAR_THRESHOLD = self.settings["EAR_THRESHOLD"]
+        DROWSY_FRAMES_THRESHOLD = self.settings["DROWSY_FRAMES_THRESHOLD"]
+        BLINK_THRESHOLD = self.settings["BLINK_THRESHOLD"]
+
+        # Initialize display
+        self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+        pygame.display.set_caption("Uykusuzluk Takip Sistemi")
         
         # Setup webcam
         self.cap = cv2.VideoCapture(0)
         if not self.cap.isOpened():
             print("Error: Could not open webcam.")
-            pygame.quit()
-            sys.exit()
+            exit()
             
         # Get webcam dimensions
         self.cam_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.cam_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        
-        self.loading_screen.update(0.6)
-        
-        # Initialize display
-        self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-        pygame.display.set_caption("Uykusuzluk Takip Sistemi")
         
         # Calculate video display dimensions
         self.video_width = SCREEN_WIDTH - PANEL_WIDTH
@@ -254,8 +148,6 @@ class ModernDrowsinessDetection:
         self.video_x = (self.video_width - self.display_width) // 2
         self.video_y = HEADER_HEIGHT + (self.video_height - self.display_height) // 2
         
-        self.loading_screen.update(0.7)
-        
         # Fonts
         self.title_font = pygame.font.SysFont("Arial", 24, bold=True)
         self.header_font = pygame.font.SysFont("Arial", 20, bold=True)
@@ -266,8 +158,6 @@ class ModernDrowsinessDetection:
         button_y = SCREEN_HEIGHT - FOOTER_HEIGHT - 50
         self.settings_button = Button(SCREEN_WIDTH - PANEL_WIDTH + 20, button_y, 120, 35, "Ayarlar", DARK_TEAL, TEAL)
         self.quit_button = Button(SCREEN_WIDTH - PANEL_WIDTH + 160, button_y, 120, 35, "Çıkış", DARK_TEAL, TEAL)
-        
-        self.loading_screen.update(0.8)
         
         # Drowsiness detection variables
         self.drowsy_frames = 0
@@ -290,61 +180,6 @@ class ModernDrowsinessDetection:
         self.running = True
         self.clock = pygame.time.Clock()
         self.face_detected = False
-        self.faces_data = {}  # Dictionary to store data for multiple faces
-        
-        # Show a welcome animation
-        self.loading_screen.update(0.9)
-        self.show_welcome_animation()
-        self.loading_screen.update(1.0)
-        
-    def show_welcome_animation(self):
-        """Show a welcome animation before starting the main application"""
-        # Clean the screen
-        self.screen.fill(DARK_GRAY)
-        
-        # Prepare welcome text
-        welcome_font = pygame.font.SysFont("Arial", 60, bold=True)
-        welcome_text = welcome_font.render("Hoş Geldiniz!", True, WHITE)
-        subtitle_font = pygame.font.SysFont("Arial", 30)
-        subtitle_text = subtitle_font.render("Uykusuzluk Takip ve Uyarı Sistemi", True, TEAL)
-        
-        # Animation parameters
-        start_time = time.time()
-        animation_duration = 2.0  # seconds
-        
-        while time.time() - start_time < animation_duration:
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    pygame.quit()
-                    sys.exit()
-                if event.type == pygame.KEYDOWN:
-                    return  # Skip animation on key press
-            
-            # Calculate animation progress (0.0 to 1.0)
-            progress = min((time.time() - start_time) / animation_duration, 1.0)
-            
-            # Clear screen
-            self.screen.fill(DARK_GRAY)
-            
-            # Animate welcome text
-            welcome_alpha = int(255 * progress)
-            welcome_text.set_alpha(welcome_alpha)
-            
-            # Position text
-            w_rect = welcome_text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 - 40))
-            s_rect = subtitle_text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 30))
-            
-            # Draw text
-            self.screen.blit(welcome_text, w_rect)
-            
-            # Show subtitle only in second half of animation
-            if progress > 0.5:
-                subtitle_alpha = int(255 * (progress - 0.5) * 2)
-                subtitle_text.set_alpha(subtitle_alpha)
-                self.screen.blit(subtitle_text, s_rect)
-            
-            pygame.display.flip()
-            self.clock.tick(60)
 
     def calculate_ear(self, eye_landmarks):
         p1 = eye_landmarks[0]
@@ -371,26 +206,26 @@ class ModernDrowsinessDetection:
     def process_frame(self, frame):
         # Convert to RGB for MediaPipe
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = self.face_mesh.process(rgb_frame)
+        results = face_mesh.process(rgb_frame)
         
+        ear = 0
         self.face_detected = False
-        self.faces_data.clear()  # Clear previous frame's data
         
         if results.multi_face_landmarks:
             self.face_detected = True
-            for face_id, face_landmarks in enumerate(results.multi_face_landmarks):
+            for face_landmarks in results.multi_face_landmarks:
                 h, w, c = frame.shape
                 
                 left_eye_coords = []
                 right_eye_coords = []
                 
-                for idx in self.LEFT_EYE:
+                for idx in LEFT_EYE:
                     landmark = face_landmarks.landmark[idx]
                     x, y = int(landmark.x * w), int(landmark.y * h)
                     left_eye_coords.append((x, y))
                     cv2.circle(frame, (x, y), 2, (0, 255, 0), -1)
                 
-                for idx in self.RIGHT_EYE:
+                for idx in RIGHT_EYE:
                     landmark = face_landmarks.landmark[idx]
                     x, y = int(landmark.x * w), int(landmark.y * h)
                     right_eye_coords.append((x, y))
@@ -400,19 +235,20 @@ class ModernDrowsinessDetection:
                 right_ear = self.calculate_ear(right_eye_coords)
                 
                 ear = (left_ear + right_ear) / 2.0
-                self.faces_data[face_id] = {
-                    "ear": ear,
-                    "drowsy_frames": self.faces_data.get(face_id, {}).get("drowsy_frames", 0),
-                    "alert_active": self.faces_data.get(face_id, {}).get("alert_active", False),
-                    "last_alert_time": self.faces_data.get(face_id, {}).get("last_alert_time", 0),
-                }
+                self.current_ear = ear
+                self.ear_values.append(ear)
                 
-                # Drowsiness detection logic
                 if ear < EAR_THRESHOLD:
-                    self.faces_data[face_id]["drowsy_frames"] += 1
+                    self.drowsy_frames += 1
                     
-                    if self.faces_data[face_id]["drowsy_frames"] >= DROWSY_FRAMES_THRESHOLD:
-                        cv2.putText(frame, f"UYKUSUZLUK UYARISI! (Kişi {face_id + 1})", (10, 30 + face_id * 30)) 
+                    if self.drowsy_frames >= DROWSY_FRAMES_THRESHOLD:
+                        cv2.putText(frame, "UYKUSUZLUK UYARISI!", (10, 30), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                        
+                        current_time = time.time()
+                        if not self.alert_active or (current_time - self.last_alert_time) > ALERT_COOLDOWN:
+                            alert_sound.play()
+                            self.alert_active = True
                             self.last_alert_time = current_time
                             self.drowsy_alerts += 1
                 else:
